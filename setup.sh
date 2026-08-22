@@ -107,10 +107,10 @@ fi
 #      dataset) can skip straight to step 1.
 # When --wheel-dir is not given at all, behavior is unchanged (always compiles).
 install_or_build_wheel() {
-    local name="$1" pkg_glob="$2" src_path="$3"
+    local name="$1" pkg_glob="$2" src_path="$3" extra_pip_args="$4"
 
     if [ -z "$WHEEL_DIR" ] ; then
-        pip install "$src_path" --no-build-isolation
+        pip install "$src_path" --no-build-isolation $extra_pip_args
         return
     fi
 
@@ -118,7 +118,7 @@ install_or_build_wheel() {
     existing_wheel=$(find "$WHEEL_DIR" -iname "${pkg_glob}*.whl" 2>/dev/null | head -n1)
     if [ -n "$existing_wheel" ] ; then
         echo "[$name] Found cached wheel, installing directly (no compile): $existing_wheel"
-        pip install "$existing_wheel"
+        pip install "$existing_wheel" $extra_pip_args
         return
     fi
 
@@ -127,11 +127,11 @@ install_or_build_wheel() {
         pip wheel "$src_path" --no-build-isolation --no-deps -w "$WHEEL_DIR"
         built_wheel=$(find "$WHEEL_DIR" -iname "${pkg_glob}*.whl" 2>/dev/null | head -n1)
         if [ -n "$built_wheel" ] ; then
-            pip install "$built_wheel"
+            pip install "$built_wheel" $extra_pip_args
         else
             echo "[$name] Warning: 'pip wheel' didn't produce a ${pkg_glob}*.whl file (check the"
             echo "[$name] package's normalized name) - installing directly without caching instead."
-            pip install "$src_path" --no-build-isolation
+            pip install "$src_path" --no-build-isolation $extra_pip_args
         fi
     else
         # WHEEL_DIR is read-only (e.g. a mounted Kaggle Dataset input) and had no
@@ -139,7 +139,7 @@ install_or_build_wheel() {
         echo "[$name] No cached wheel in read-only $WHEEL_DIR - compiling for this run only"
         echo "[$name] (build a wheel into a writable --wheel-dir once, then re-upload it as a"
         echo "[$name] dataset, to avoid recompiling $name in future runs)."
-        pip install "$src_path" --no-build-isolation
+        pip install "$src_path" --no-build-isolation $extra_pip_args
     fi
 }
 
@@ -238,5 +238,13 @@ fi
 if [ "$OVOXEL" = true ] ; then
     mkdir -p /tmp/extensions
     cp -r o-voxel /tmp/extensions/o-voxel
+    # NOTE: o-voxel/pyproject.toml originally pinned `cumesh` and `flex_gemm` as
+    # direct git+https URLs, which made pip re-clone and recompile both from
+    # source on every o-voxel install even when already-built local copies
+    # existed. Fixed upstream in trellis2/o-voxel/pyproject.toml by pinning them
+    # as plain names instead, so pip resolves against whatever's already
+    # installed (cumesh/flex_gemm run earlier in this script). If you're on a
+    # copy of the repo that still has the old git-URL pins, either patch
+    # o-voxel/pyproject.toml directly or add --no-deps to the install below.
     install_or_build_wheel "O-VOXEL" "o_voxel" /tmp/extensions/o-voxel
 fi
