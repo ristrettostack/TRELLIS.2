@@ -28,12 +28,22 @@ def _resolve_backend(requested: str, *, explicit: bool) -> str:
             gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no GPU'
         except Exception:
             gpu_name = 'unknown GPU'
+        # Prefer xformers if it's installed: it has an officially supported Turing
+        # (sm75+, e.g. T4) kernel path, and PyTorch's own `sdpa` actually dispatches
+        # to xformers' memory-efficient kernel under the hood on Turing anyway when
+        # it's available - so using it directly is at least as fast and more
+        # predictable than relying on sdpa's internal backend selection.
+        try:
+            import xformers.ops  # noqa: F401
+            fallback = 'xformers'
+        except ImportError:
+            fallback = 'sdpa'
         print(
             f"[ATTENTION] '{requested}' was {'explicitly requested' if explicit else 'the default'} "
             f"but is not supported on this GPU ({gpu_name}, compute capability < 8.0). "
-            f"Falling back to 'sdpa'."
+            f"Falling back to '{fallback}'."
         )
-        return 'sdpa'
+        return fallback
     return requested
 
 
