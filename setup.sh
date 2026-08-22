@@ -143,6 +143,13 @@ install_or_build_wheel() {
     fi
 }
 
+# Quick check used to skip the (network) git clone / local copy step entirely
+# when a matching wheel is already cached - no point fetching source we don't
+# need to build.
+wheel_cached() {
+    [ -n "$WHEEL_DIR" ] && [ -n "$(find "$WHEEL_DIR" -iname "${1}*.whl" 2>/dev/null | head -n1)" ]
+}
+
 if [ "$FLASHATTN" = true ] ; then
     if [ "$PLATFORM" = "cuda" ] ; then
         # Compare using plain bash integer arithmetic on the major version (e.g. "7.5" -> 7)
@@ -202,8 +209,10 @@ fi
 
 if [ "$NVDIFFRAST" = true ] ; then
     if [ "$PLATFORM" = "cuda" ] ; then
-        mkdir -p /tmp/extensions
-        git clone -b v0.4.0 https://github.com/NVlabs/nvdiffrast.git /tmp/extensions/nvdiffrast
+        if ! wheel_cached "nvdiffrast" ; then
+            mkdir -p /tmp/extensions
+            git clone -b v0.4.0 https://github.com/NVlabs/nvdiffrast.git /tmp/extensions/nvdiffrast
+        fi
         install_or_build_wheel "NVDIFFRAST" "nvdiffrast" /tmp/extensions/nvdiffrast
     else
         echo "[NVDIFFRAST] Unsupported platform: $PLATFORM"
@@ -212,8 +221,10 @@ fi
 
 if [ "$NVDIFFREC" = true ] ; then
     if [ "$PLATFORM" = "cuda" ] ; then
-        mkdir -p /tmp/extensions
-        git clone -b renderutils https://github.com/JeffreyXiang/nvdiffrec.git /tmp/extensions/nvdiffrec
+        if ! wheel_cached "nvdiffrec" ; then
+            mkdir -p /tmp/extensions
+            git clone -b renderutils https://github.com/JeffreyXiang/nvdiffrec.git /tmp/extensions/nvdiffrec
+        fi
         install_or_build_wheel "NVDIFFREC" "nvdiffrec" /tmp/extensions/nvdiffrec
     else
         echo "[NVDIFFREC] Unsupported platform: $PLATFORM"
@@ -221,14 +232,20 @@ if [ "$NVDIFFREC" = true ] ; then
 fi
 
 if [ "$CUMESH" = true ] ; then
-    mkdir -p /tmp/extensions
-    git clone https://github.com/JeffreyXiang/CuMesh.git /tmp/extensions/CuMesh --recursive
+    if ! wheel_cached "cumesh" ; then
+        mkdir -p /tmp/extensions
+        # --recursive here also pulls the cubvh submodule and (via cubvh) the ~112MB
+        # eigen submodule - exactly the kind of clone this cache check is meant to skip.
+        git clone https://github.com/JeffreyXiang/CuMesh.git /tmp/extensions/CuMesh --recursive
+    fi
     install_or_build_wheel "CUMESH" "cumesh" /tmp/extensions/CuMesh
 fi
 
 if [ "$FLEXGEMM" = true ] ; then
-    mkdir -p /tmp/extensions
-    git clone https://github.com/JeffreyXiang/FlexGEMM.git /tmp/extensions/FlexGEMM --recursive
+    if ! wheel_cached "flex*gemm" ; then
+        mkdir -p /tmp/extensions
+        git clone https://github.com/JeffreyXiang/FlexGEMM.git /tmp/extensions/FlexGEMM --recursive
+    fi
     # matches either a "flexgemm*" or "flex_gemm*" distribution name, since the
     # importable module name is `flex_gemm` but the wheel's distribution name
     # (used in the .whl filename) isn't guaranteed to match exactly
@@ -236,8 +253,10 @@ if [ "$FLEXGEMM" = true ] ; then
 fi
 
 if [ "$OVOXEL" = true ] ; then
-    mkdir -p /tmp/extensions
-    cp -r o-voxel /tmp/extensions/o-voxel
+    if ! wheel_cached "o_voxel" ; then
+        mkdir -p /tmp/extensions
+        cp -r o-voxel /tmp/extensions/o-voxel
+    fi
     # NOTE: o-voxel/pyproject.toml originally pinned `cumesh` and `flex_gemm` as
     # direct git+https URLs, which made pip re-clone and recompile both from
     # source on every o-voxel install even when already-built local copies
