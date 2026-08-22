@@ -1,5 +1,5 @@
 # Read Arguments
-TEMP=`getopt -o h --long help,new-env,basic,flash-attn,xformers,cumesh,o-voxel,flexgemm,nvdiffrast,nvdiffrec -n 'setup.sh' -- "$@"`
+TEMP=`getopt -o h --long help,new-env,basic,flash-attn,xformers,cumesh,o-voxel,flexgemm,nvdiffrast,nvdiffrec,wheel-dir: -n 'setup.sh' -- "$@"`
 
 eval set -- "$TEMP"
 
@@ -13,6 +13,7 @@ OVOXEL=false
 FLEXGEMM=false
 NVDIFFRAST=false
 NVDIFFREC=false
+WHEEL_DIR=""
 ERROR=false
 
 
@@ -32,6 +33,7 @@ while true ; do
         --flexgemm) FLEXGEMM=true ; shift ;;
         --nvdiffrast) NVDIFFRAST=true ; shift ;;
         --nvdiffrec) NVDIFFREC=true ; shift ;;
+        --wheel-dir) WHEEL_DIR="$2" ; shift 2 ;;
         --) shift ; break ;;
         *) ERROR=true ; break ;;
     esac
@@ -55,6 +57,16 @@ if [ "$HELP" = true ] ; then
     echo "  --flexgemm              Install flexgemm"
     echo "  --nvdiffrast            Install nvdiffrast"
     echo "  --nvdiffrec             Install nvdiffrec"
+    echo "  --wheel-dir DIR         Cache/reuse built wheels for nvdiffrast, nvdiffrec, cumesh,"
+    echo "                          o-voxel, and flexgemm in DIR instead of compiling every run."
+    echo "                          First run with an empty/new DIR builds and caches; later runs"
+    echo "                          (even in a fresh Kaggle/Colab session) reusing the same DIR"
+    echo "                          just pip-install the cached .whl - no recompiling."
+    echo "                          On Kaggle: point DIR at /kaggle/working/wheels the first time,"
+    echo "                          then turn that folder into a Kaggle Dataset and point DIR at"
+    echo "                          the mounted /kaggle/input/<dataset> path on later runs."
+    echo "                          NOTE: wheels are compiled for a specific GPU arch (sm75 for T4,"
+    echo "                          etc) - only reuse a wheel dir across runs on the same GPU type."
     return
 fi
 
@@ -82,9 +94,61 @@ if [ "$PLATFORM" = "cuda" ] && command -v nvidia-smi > /dev/null; then
     GPU_CC=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1)
 fi
 
+# Build-once, reuse-forever helper for the source-compiled extensions (nvdiffrast,
+# nvdiffrec, cumesh, o-voxel, flexgemm). Each of these currently does a plain
+# `pip install <src_dir> --no-build-isolation`, which recompiles CUDA code from
+# scratch on every single run - the main cost of the ~30min setup on an ephemeral
+# environment like Kaggle. When --wheel-dir is given, this instead:
+#   1. Looks in WHEEL_DIR for an already-built wheel matching the package -> if
+#      found, just `pip install`s it directly (seconds, no compiling).
+#   2. Otherwise builds a wheel via `pip wheel` (compiles once), installs it, and
+#      - if WHEEL_DIR is writable - saves it into WHEEL_DIR so the *next* run
+#      (even a fresh Kaggle session, as long as it reuses the same WHEEL_DIR/
+#      dataset) can skip straight to step 1.
+# When --wheel-dir is not given at all, behavior is unchanged (always compiles).
+install_or_build_wheel() {
+    local name="$1" pkg_glob="$2" src_path="$3"
+
+    if [ -z "$WHEEL_DIR" ] ; then
+        pip install "$src_path" --no-build-isolation
+        return
+    fi
+
+    mkdir -p "$WHEEL_DIR" 2>/dev/null
+    existing_wheel=$(find "$WHEEL_DIR" -iname "${pkg_glob}*.whl" 2>/dev/null | head -n1)
+    if [ -n "$existing_wheel" ] ; then
+        echo "[$name] Found cached wheel, installing directly (no compile): $existing_wheel"
+        pip install "$existing_wheel"
+        return
+    fi
+
+    if [ -w "$WHEEL_DIR" ] ; then
+        echo "[$name] No cached wheel in $WHEEL_DIR - building once and caching for next time..."
+        pip wheel "$src_path" --no-build-isolation --no-deps -w "$WHEEL_DIR"
+        built_wheel=$(find "$WHEEL_DIR" -iname "${pkg_glob}*.whl" 2>/dev/null | head -n1)
+        if [ -n "$built_wheel" ] ; then
+            pip install "$built_wheel"
+        else
+            echo "[$name] Warning: 'pip wheel' didn't produce a ${pkg_glob}*.whl file (check the"
+            echo "[$name] package's normalized name) - installing directly without caching instead."
+            pip install "$src_path" --no-build-isolation
+        fi
+    else
+        # WHEEL_DIR is read-only (e.g. a mounted Kaggle Dataset input) and had no
+        # matching wheel - can't cache here, just build+install for this run.
+        echo "[$name] No cached wheel in read-only $WHEEL_DIR - compiling for this run only"
+        echo "[$name] (build a wheel into a writable --wheel-dir once, then re-upload it as a"
+        echo "[$name] dataset, to avoid recompiling $name in future runs)."
+        pip install "$src_path" --no-build-isolation
+    fi
+}
+
 if [ "$FLASHATTN" = true ] ; then
     if [ "$PLATFORM" = "cuda" ] ; then
-        if [ -n "$GPU_CC" ] && [ "$(echo "$GPU_CC < 8.0" | bc -l 2>/dev/null)" = "1" ] ; then
+        # Compare using plain bash integer arithmetic on the major version (e.g. "7.5" -> 7)
+        # rather than `bc`, which isn't guaranteed to be present on minimal/slim images.
+        GPU_CC_MAJOR="${GPU_CC%%.*}"
+        if [ -n "$GPU_CC_MAJOR" ] && [ "$GPU_CC_MAJOR" -lt 8 ] 2>/dev/null ; then
             echo "[FLASHATTN] Warning: detected GPU compute capability $GPU_CC (e.g. T4 = 7.5)."
             echo "[FLASHATTN] flash-attn's official wheels only support Ampere+ (sm80+) and will"
             echo "[FLASHATTN] fail at runtime on this GPU, even though the pip install itself succeeds."
@@ -140,7 +204,7 @@ if [ "$NVDIFFRAST" = true ] ; then
     if [ "$PLATFORM" = "cuda" ] ; then
         mkdir -p /tmp/extensions
         git clone -b v0.4.0 https://github.com/NVlabs/nvdiffrast.git /tmp/extensions/nvdiffrast
-        pip install /tmp/extensions/nvdiffrast --no-build-isolation
+        install_or_build_wheel "NVDIFFRAST" "nvdiffrast" /tmp/extensions/nvdiffrast
     else
         echo "[NVDIFFRAST] Unsupported platform: $PLATFORM"
     fi
@@ -150,7 +214,7 @@ if [ "$NVDIFFREC" = true ] ; then
     if [ "$PLATFORM" = "cuda" ] ; then
         mkdir -p /tmp/extensions
         git clone -b renderutils https://github.com/JeffreyXiang/nvdiffrec.git /tmp/extensions/nvdiffrec
-        pip install /tmp/extensions/nvdiffrec --no-build-isolation
+        install_or_build_wheel "NVDIFFREC" "nvdiffrec" /tmp/extensions/nvdiffrec
     else
         echo "[NVDIFFREC] Unsupported platform: $PLATFORM"
     fi
@@ -159,17 +223,20 @@ fi
 if [ "$CUMESH" = true ] ; then
     mkdir -p /tmp/extensions
     git clone https://github.com/JeffreyXiang/CuMesh.git /tmp/extensions/CuMesh --recursive
-    pip install /tmp/extensions/CuMesh --no-build-isolation
+    install_or_build_wheel "CUMESH" "cumesh" /tmp/extensions/CuMesh
 fi
 
 if [ "$FLEXGEMM" = true ] ; then
     mkdir -p /tmp/extensions
     git clone https://github.com/JeffreyXiang/FlexGEMM.git /tmp/extensions/FlexGEMM --recursive
-    pip install /tmp/extensions/FlexGEMM --no-build-isolation
+    # matches either a "flexgemm*" or "flex_gemm*" distribution name, since the
+    # importable module name is `flex_gemm` but the wheel's distribution name
+    # (used in the .whl filename) isn't guaranteed to match exactly
+    install_or_build_wheel "FLEXGEMM" "flex*gemm" /tmp/extensions/FlexGEMM
 fi
 
 if [ "$OVOXEL" = true ] ; then
     mkdir -p /tmp/extensions
     cp -r o-voxel /tmp/extensions/o-voxel
-    pip install /tmp/extensions/o-voxel --no-build-isolation
+    install_or_build_wheel "O-VOXEL" "o_voxel" /tmp/extensions/o-voxel
 fi
